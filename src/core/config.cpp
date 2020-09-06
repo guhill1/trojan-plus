@@ -74,19 +74,31 @@ const static int default_dns_udp_recv_buf   = 512 * 4;
 const static int default_dns_udp_socket_buf = -1;
 
 void Config::load(const string& filename) {
+    _guard;
     ptree tree;
     read_json(filename, tree);
     populate(tree);
+    _unguard;
 }
 
 void Config::populate(const string& JSON) {
+    _guard;
     istringstream s(JSON);
     ptree tree;
     read_json(s, tree);
     populate(tree);
+    _unguard;
 }
 
 void Config::populate(const ptree& tree) {
+    _guard;
+    // read the log_level first
+    log_level = static_cast<Log::Level>(tree.get("log_level", default_log_level));
+    if (Log::level == Log::INVALID) {
+        // don't let load-balance config override the log level
+        Log::level = log_level;
+    }
+
     string rt = tree.get("run_type", string("client"));
     if (rt == "server") {
         run_type = SERVER;
@@ -115,12 +127,6 @@ void Config::populate(const ptree& tree) {
             const auto& p       = item.second.get_value<string>();
             password[SHA224(p)] = p;
         }
-    }
-
-    log_level = static_cast<Log::Level>(tree.get("log_level", default_log_level));
-    if (Log::level == Log::INVALID) {
-        // don't let load-balance config override the log level
-        Log::level = log_level;
     }
 
     udp_timeout            = tree.get("udp_timeout", default_udp_timeout);
@@ -164,6 +170,7 @@ void Config::populate(const ptree& tree) {
     tcp.keep_alive       = tree.get("tcp.keep_alive", true);
     tcp.reuse_port       = tree.get("tcp.reuse_port", false);
     tcp.fast_open        = tree.get("tcp.fast_open", false);
+    tcp.use_tproxy       = tree.get("tcp.use_tproxy", false);
     tcp.fast_open_qlen   = tree.get("tcp.fast_open_qlen", default_tcp_fast_open_qlen);
     tcp.connect_time_out = tree.get("tcp.connect_time_out", default_tcp_connect_time_out);
 
@@ -182,18 +189,14 @@ void Config::populate(const ptree& tree) {
     experimental._pipeline_loadbalance_configs.clear();
     experimental._pipeline_loadbalance_context.clear();
     experimental.pipeline_proxy_icmp = tree.get("experimental.pipeline_proxy_icmp", false);
-
     if (run_type != SERVER) {
         if (tree.get_child_optional("experimental.pipeline_loadbalance_configs")) {
-            if (experimental.pipeline_num == 0) {
-                _log_with_date_time(
-                  "Pipeline load balance need to enable pipeline (set pipeline_num as non zero)", Log::ERROR);
-            } else {
-                for (const auto& item : tree.get_child("experimental.pipeline_loadbalance_configs")) {
-                    const auto& config = item.second.get_value<string>();
-                    experimental.pipeline_loadbalance_configs.emplace_back(config);
-                }
+            for (const auto& item : tree.get_child("experimental.pipeline_loadbalance_configs")) {
+                const auto& config = item.second.get_value<string>();
+                experimental.pipeline_loadbalance_configs.emplace_back(config);
+            }
 
+            if (!experimental.pipeline_loadbalance_configs.empty()) {
                 std::string tmp;
                 _log_with_date_time("Pipeline will use load balance config:", Log::WARN);
                 for (const auto& item : experimental.pipeline_loadbalance_configs) {
@@ -207,6 +210,11 @@ void Config::populate(const ptree& tree) {
                     experimental._pipeline_loadbalance_configs.emplace_back(other);
                     experimental._pipeline_loadbalance_context.emplace_back(ssl);
                     _log_with_date_time("Loaded " + item + " config.", Log::WARN);
+                }
+
+                if (experimental.pipeline_num == 0) {
+                    _log_with_date_time(
+                      "Pipeline load balance need to enable pipeline (set pipeline_num as non zero)", Log::ERROR);
                 }
             }
         }
@@ -238,13 +246,22 @@ void Config::populate(const ptree& tree) {
 
     if (route.enabled) {
         if (run_type == CLIENT_TUN) {
-            load_ips(route.cn_mainland_ips_file, route._cn_mainland_ips_subnet, route._cn_mainland_ips);
-            load_ips(route.white_ips, route._white_ips_subnet, route._white_ips);
-            load_ips(route.proxy_ips, route._proxy_ips_subnet, route._proxy_ips);
+            size_t count = 0;
+            route._cn_mainland_ips_matcher.load_from_file(route.cn_mainland_ips_file, count);
+            _log_with_date_time(
+              "[route] load " + to_string(count) + " cn_mainland_ips from file " + route.cn_mainland_ips_file);
+
+            route._white_ips_matcher.load_from_file(route.white_ips, count);
+            _log_with_date_time("[route] load " + to_string(count) + " white_ips from file " + route.white_ips);
+
+            route._proxy_ips_matcher.load_from_file(route.proxy_ips, count);
+            _log_with_date_time("[route] load " + to_string(count) + " proxy_ips from file " + route.proxy_ips);
 
             if (route.proxy_type == RouteType::route_gfwlist && !dns.enabled) {
                 _log_with_date_time("[route] route_gfwlist need dns with gfw's list support!", Log::ERROR);
             }
+
+            _log_with_date_time("[route] type: " + to_string(route.proxy_type));
         } else {
             _log_with_date_time("[route] Now cannot enable route function without tun mode!", Log::ERROR);
         }
@@ -257,38 +274,24 @@ void Config::populate(const ptree& tree) {
     const auto hash_str = get_remote_addr() + ":" + to_string(get_remote_port());
     compare_hash        = get_hashCode(hash_str);
     _log_with_date_time_ALL("[config] has loaded [" + hash_str + "] in hashCode: " + to_string(compare_hash));
+
+    _unguard;
 }
 
 void Config::load_dns(const boost::property_tree::ptree& tree) {
+    _guard;
+
     if (!dns.enabled) {
         return;
     }
     if (!dns.gfwlist.empty()) {
-        ifstream file(dns.gfwlist);
-        if (file) {
-            size_t total_count = 0;
-            for (string line; std::getline(file, line);) {
-                line.erase(std::remove(line.begin(), line.end(), ' '), line.end());
-                if (!line.empty()) {
-                    total_count++;
-                    auto it = dns._gfwlist.find(line.size());
-                    if (it != dns._gfwlist.end()) {
-                        it->second.emplace_back(line);
-                    } else {
-                        vector<string> list;
-                        list.emplace_back(line);
-                        dns._gfwlist.emplace(line.size(), list);
-                    }
-                }
-            }
-
-            if (dns._gfwlist.empty()) {
+        size_t count = 0;
+        if (dns._gfwlist_matcher.load_from_file(dns.gfwlist, count)) {
+            if (count == 0) {
                 dns.enabled = false;
                 _log_with_date_time("[dns] '" + dns.gfwlist + "' is empty!", Log::ERROR);
             } else {
-                _log_with_date_time("[dns] loaded " + to_string(total_count) + " domains in " +
-                                      to_string(dns._gfwlist.size()) + " groups, from " + dns.gfwlist,
-                  Log::WARN);
+                _log_with_date_time("[dns] loaded " + to_string(count) + " domains from " + dns.gfwlist, Log::WARN);
             }
         } else {
             dns.enabled = false;
@@ -323,74 +326,11 @@ void Config::load_dns(const boost::property_tree::ptree& tree) {
             dns.up_gfw_dns_server.emplace_back("8.8.8.8");
         }
     }
-}
-
-void Config::load_ips(const std::string& filename, IPSubnetList& subnet, IPList& ips) {
-    ifstream file(filename);
-    if (file) {
-        size_t subnet_count           = 0;
-        const uint32_t max_mask_value = numeric_limits<uint32_t>::digits;
-
-        for (string line; std::getline(file, line);) {
-            line.erase(std::remove(line.begin(), line.end(), ' '), line.end());
-            if (!line.empty()) {
-                size_t pos = line.find('/');
-                if (pos != string::npos) {
-                    auto net      = line.substr(0, pos);
-                    auto mask_str = line.substr(pos + 1);
-                    uint32_t mask = 0;
-
-                    boost::system::error_code ec;
-                    auto addr = boost::asio::ip::make_address_v4(net, ec);
-                    if (ec || !safe_atov(mask_str, mask) || mask == 0 || mask > max_mask_value) {
-                        string error_msg("[tun] error load '");
-                        error_msg += (line);
-                        error_msg += "' from ";
-                        error_msg += filename;
-                        _log_with_date_time(error_msg, Log::ERROR);
-                        continue;
-                    }
-                    auto it = subnet.find(mask);
-                    if (it == subnet.end()) {
-                        IPList l;
-                        l.emplace_back(addr.to_uint());
-                        subnet.emplace(mask - 1, l);
-                    } else {
-                        it->second.emplace_back(addr.to_uint());
-                    }
-                    subnet_count++;
-                } else {
-                    boost::system::error_code ec;
-                    auto addr = boost::asio::ip::make_address_v4(line, ec);
-                    if (ec) {
-                        string error_msg("[tun] error load '");
-                        error_msg += (line);
-                        error_msg += "' from ";
-                        error_msg += filename;
-                        _log_with_date_time(error_msg, Log::ERROR);
-                        continue;
-                    }
-                    ips.emplace_back(addr.to_uint());
-                }
-            }
-        }
-
-        for (auto it : subnet) {
-            sort(it.second.begin(), it.second.end());
-        }
-        sort(ips.begin(), ips.end());
-        if (subnet_count > 0 || !ips.empty()) {
-            _log_with_date_time("[tun] loaded " + to_string(subnet_count) + " subnet in " + to_string(subnet.size()) +
-                                  " groups and " + to_string(ips.size()) + " ips from " + filename,
-              Log::INFO);
-        }
-
-    } else {
-        _log_with_date_time("[tun] cannot open '" + filename + "' file to read ip list!", Log::ERROR);
-    }
+    _unguard;
 }
 
 bool Config::try_prepare_pipeline_proxy_icmp(bool is_ipv4) {
+    _guard;
     if (experimental.pipeline_proxy_icmp) {
         // set this icmp false first
         experimental.pipeline_proxy_icmp = false;
@@ -425,9 +365,11 @@ bool Config::try_prepare_pipeline_proxy_icmp(bool is_ipv4) {
     }
 
     return false;
+    _unguard;
 }
 
 bool Config::sip003() {
+    _guard;
     char* JSON = getenv("SS_PLUGIN_OPTIONS");
     if (JSON == nullptr) {
         return false;
@@ -451,10 +393,11 @@ bool Config::sip003() {
             break;
     }
     return true;
+    _unguard;
 }
 
 void Config::prepare_ssl_context(boost::asio::ssl::context& ssl_context, string& plain_http_response) {
-
+    _guard;
     auto* native_context = ssl_context.native_handle();
     ssl_context.set_options(
       context::default_workarounds | context::no_sslv2 | context::no_sslv3 | context::single_dh_use);
@@ -474,12 +417,14 @@ void Config::prepare_ssl_context(boost::asio::ssl::context& ssl_context, string&
               native_context,
               [](SSL*, const unsigned char** out, unsigned char* outlen, const unsigned char* in, unsigned int inlen,
                 void* config) -> int {
+                  _guard;
                   if (SSL_select_next_proto((unsigned char**)out, outlen,
                         (unsigned char*)(((Config*)config)->ssl.alpn.c_str()),
                         (unsigned int)((Config*)config)->ssl.alpn.length(), in, inlen) != OPENSSL_NPN_NEGOTIATED) {
                       return SSL_TLSEXT_ERR_NOACK;
                   }
                   return SSL_TLSEXT_ERR_OK;
+                  _unguard;
               },
               this);
         }
@@ -649,9 +594,12 @@ void Config::prepare_ssl_context(boost::asio::ssl::context& ssl_context, string&
         _log_with_date_time("SSL KeyLog is not supported", Log::WARN);
 #endif // ENABLE_SSL_KEYLOG
     }
+
+    _unguard;
 }
 
-void Config::prepare_ssl_reuse(boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& socket) const {
+void Config::prepare_ssl_reuse(SSLSocket& socket) const {
+    _guard;
     auto* ssl_handle = socket.native_handle();
     if (!ssl.sni.empty()) {
         SSL_set_tlsext_host_name(ssl_handle, ssl.sni.c_str());
@@ -662,11 +610,14 @@ void Config::prepare_ssl_reuse(boost::asio::ssl::stream<boost::asio::ip::tcp::so
             SSL_set_session(ssl_handle, session);
         }
     }
+    _unguard;
 }
 
 string Config::SHA224(const string& message) {
+    _guard;
+
     uint8_t digest[EVP_MAX_MD_SIZE];
-    char mdString[(EVP_MAX_MD_SIZE << 1) + 1];
+    char mdString[MAX_PASSWORD_LENGTH + 1];
     unsigned int digest_len = 0;
     EVP_MD_CTX* ctx         = nullptr;
     if ((ctx = EVP_MD_CTX_new()) == nullptr) {
@@ -685,10 +636,16 @@ string Config::SHA224(const string& message) {
         throw runtime_error("[sha224] could not output hash");
     }
 
+    if (digest_len * 2 >= MAX_PASSWORD_LENGTH) {
+        throw runtime_error("[sha224] password length is too large");
+    }
+
     for (unsigned int i = 0; i < digest_len; ++i) {
         sprintf((mdString + (i << 1)), "%02x", (unsigned int)digest[i]);
     }
     gsl::at(mdString, digest_len << 1) = '\0';
     EVP_MD_CTX_free(ctx);
     return string((const char*)mdString);
+
+    _unguard;
 }

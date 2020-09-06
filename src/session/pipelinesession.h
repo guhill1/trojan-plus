@@ -36,7 +36,7 @@ class icmpd;
 class Service;
 class ServerSession;
 class PipelineSession : public SocketSession {
-    typedef std::list<std::shared_ptr<ServerSession>> SessionsList;
+    using SessionsList = std::list<std::shared_ptr<ServerSession>>;
 
     enum Status { HANDSHAKE, STREAMING, DESTROY } status;
 
@@ -45,7 +45,7 @@ class PipelineSession : public SocketSession {
     const std::string& plain_http_response;
 
     SessionsList sessions;
-    boost::asio::ssl::stream<boost::asio::ip::tcp::socket> live_socket;
+    std::shared_ptr<SSLSocket> live_socket;
     boost::asio::steady_timer gc_timer;
     SendDataCache sending_data_cache;
     boost::asio::ssl::context& ssl_context;
@@ -64,9 +64,12 @@ class PipelineSession : public SocketSession {
     bool find_and_process_session(
       PipelineComponent::SessionIdType session_id, std::function<void(SessionsList::iterator&)>&& processor);
 
+    void move_socket_to_serversession(const std::string_view& data);
+
   public:
     PipelineSession(Service* _service, const Config& config, boost::asio::ssl::context& ssl_context,
       std::shared_ptr<Authenticator> auth, const std::string& plain_http_response);
+
     void destroy(bool pipeline_call = false) final;
 
     boost::asio::ip::tcp::socket& accept_socket() final;

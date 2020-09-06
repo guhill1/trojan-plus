@@ -29,12 +29,12 @@
 #include <boost/property_tree/ptree.hpp>
 #include <cstdint>
 #include <map>
-#include <unordered_map>
 #include <vector>
 
 class Config {
 
   public:
+    enum { MAX_PASSWORD_LENGTH = (EVP_MAX_MD_SIZE << 1) };
     enum RunType {
         SERVER,
         CLIENT,
@@ -80,6 +80,7 @@ class Config {
         bool keep_alive;
         bool reuse_port;
         bool fast_open;
+        bool use_tproxy;
         int fast_open_qlen;
         int connect_time_out;
     };
@@ -121,29 +122,23 @@ class Config {
         std::string gfwlist;
         bool enable_cached;
         bool enable_ping_test;
-        std::unordered_map<size_t, std::vector<std::string>> _gfwlist;
+        DomainMatcher _gfwlist_matcher;
         std::vector<std::string> up_dns_server;
         std::vector<std::string> up_gfw_dns_server;
     };
-
-    using IPList       = std::vector<uint32_t>;
-    using IPSubnetList = std::unordered_map<uint32_t, IPList>;
 
     using ROUTE = struct {
         bool enabled;
         RouteType proxy_type;
 
         std::string cn_mainland_ips_file;
-        IPSubnetList _cn_mainland_ips_subnet;
-        IPList _cn_mainland_ips;
+        IPv4Matcher _cn_mainland_ips_matcher;
 
         std::string white_ips;
-        IPSubnetList _white_ips_subnet;
-        IPList _white_ips;
+        IPv4Matcher _white_ips_matcher;
 
         std::string proxy_ips;
-        IPSubnetList _proxy_ips_subnet;
-        IPList _proxy_ips;
+        IPv4Matcher _proxy_ips_matcher;
     };
 
   private:
@@ -175,15 +170,13 @@ class Config {
 
     void load_dns(const boost::property_tree::ptree& tree);
 
-    static void load_ips(const std::string& filename, IPSubnetList& subnet, IPList& ips);
-
     static std::string SHA224(const std::string& message);
 
   public:
     [[nodiscard]] bool sip003();
     void load(const std::string& filename);
     void prepare_ssl_context(boost::asio::ssl::context& ssl_context, std::string& plain_http_response);
-    void prepare_ssl_reuse(boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& socket) const;
+    void prepare_ssl_reuse(SSLSocket& socket) const;
     [[nodiscard]] bool operator==(const Config& other) const { return compare_hash == other.compare_hash; }
     [[nodiscard]] bool try_prepare_pipeline_proxy_icmp(bool is_ipv4);
 

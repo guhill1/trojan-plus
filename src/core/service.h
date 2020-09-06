@@ -42,7 +42,7 @@ class Pipeline;
 class icmpd;
 class Service {
   private:
-    typedef std::list<std::weak_ptr<Pipeline>> PipelineList;
+    using PipelineList = std::list<std::weak_ptr<Pipeline>>;
 
     boost::asio::io_context io_context;
     boost::asio::ip::tcp::acceptor socket_acceptor;

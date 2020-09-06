@@ -34,6 +34,7 @@
 #include <list>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifndef _WIN32
@@ -56,7 +57,7 @@
 #endif // IP6T_SO_ORIGINAL_DST
 
 #ifdef ENABLE_REUSE_PORT
-typedef boost::asio::detail::socket_option::boolean<SOL_SOCKET, SO_REUSEPORT> reuse_port;
+using reuse_port = boost::asio::detail::socket_option::boolean<SOL_SOCKET, SO_REUSEPORT>;
 #endif // ENABLE_REUSE_PORT
 
 #ifndef IP_RECVTTL
@@ -123,6 +124,36 @@ typedef boost::asio::detail::socket_option::boolean<SOL_SOCKET, SO_REUSEPORT> re
 #define _define_is_const(name)                                                                                         \
     [[nodiscard]] inline bool is_##name() const { return name; }
 
+#define _test_case(hdr, func, val, val_type)                                                                           \
+    do {                                                                                                               \
+        hdr.func((val_type)(val));                                                                                     \
+        if ((val_type)(val) != hdr.func()) {                                                                           \
+            throw std::runtime_error("Error: " #func " is not same!!!");                                               \
+        }                                                                                                              \
+    } while (false)
+
+#define _test_case_call_assert(hdr, func, val, val_type)                                                               \
+    do {                                                                                                               \
+        if ((val_type)(val) != hdr.func()) {                                                                           \
+            throw std::runtime_error("Error: " #func " final value is not correct!!");                                 \
+        }                                                                                                              \
+    } while (false)
+
+#define _test_case_assert(exp, exp1)                                                                                   \
+    do {                                                                                                               \
+        if ((exp) != (exp1)) {                                                                                         \
+            throw std::runtime_error(                                                                                  \
+              "test_cases failed, [" #exp "==" + std::to_string(exp) + "] is not equal [" #exp1 "]");                  \
+        }                                                                                                              \
+    } while (false)
+
+#define _test_case_assert_str(exp, exp1)                                                                               \
+    do {                                                                                                               \
+        if ((exp) != (exp1)) {                                                                                         \
+            throw std::runtime_error("test_cases failed, [" #exp "==" + (exp) + "] is not equal [" #exp1 "]");         \
+        }                                                                                                              \
+    } while (false)
+
 const static int half_byte_shift_4_bits    = 4;
 const static int one_byte_shift_8_bits     = 8;
 const static int two_bytes_shift_16_bits   = 16;
@@ -149,6 +180,8 @@ unsigned short get_checksum(const std::string& str);
 int get_hashCode(const std::string& str);
 
 void write_data_to_file(int id, const std::string& tag, const std::string_view& data);
+
+using SSLSocket = boost::asio::ssl::stream<boost::asio::ip::tcp::socket>;
 
 using SentHandler     = std::function<void(const boost::system::error_code ec)>;
 using AsyncWriter     = std::function<void(const boost::asio::streambuf& data, SentHandler&& handler)>;
@@ -199,8 +232,8 @@ class SendDataCache {
 
   public:
     SendDataCache();
-    ~SendDataCache();
 
+    void destroy();
     void set_async_writer(AsyncWriter&& writer);
     void set_is_connected_func(ConnectionFunc&& func);
     void insert_data(const std::string_view& data);
@@ -216,6 +249,7 @@ class ReadDataCache {
 
   public:
     inline void push_data(const std::string_view& data) {
+        _guard;
         if (is_waiting) {
             is_waiting = false;
             read_handler(data, 1);
@@ -223,9 +257,11 @@ class ReadDataCache {
             push_ack_count++;
             streambuf_append(data_queue, data);
         }
+        _unguard;
     }
 
     inline void async_read(ReadHandler&& handler) {
+        _guard;
         if (data_queue.size() == 0) {
             is_waiting   = true;
             read_handler = std::move(handler);
@@ -234,6 +270,7 @@ class ReadDataCache {
             data_queue.consume(data_queue.size());
             push_ack_count = 0;
         }
+        _unguard;
     }
 
     [[nodiscard]] inline bool has_queued_data() const { return data_queue.size() > 0; }
@@ -244,7 +281,8 @@ class SendingDataAllocator {
     std::list<std::shared_ptr<boost::asio::streambuf>> free_bufs;
 
   public:
-    std::shared_ptr<boost::asio::streambuf> allocate(const std::string_view& data) {
+    inline std::shared_ptr<boost::asio::streambuf> allocate(const std::string_view& data) {
+        _guard;
         auto buf = std::shared_ptr<boost::asio::streambuf>(nullptr);
         if (free_bufs.empty()) {
             buf = std::make_shared<boost::asio::streambuf>();
@@ -256,9 +294,11 @@ class SendingDataAllocator {
 
         streambuf_append(*buf, data);
         return buf;
+        _unguard;
     }
 
     void free(const std::shared_ptr<boost::asio::streambuf>& buf) {
+        _guard;
         bool found = false;
         for (const auto& it : allocated) {
             if (it.get() == buf.get()) {
@@ -273,6 +313,7 @@ class SendingDataAllocator {
 
         buf->consume(buf->size());
         free_bufs.push_back(buf);
+        _unguard;
     }
 };
 
@@ -297,15 +338,17 @@ class ReadBufWithGuard {
 
     inline operator std::string_view() const { return streambuf_to_string_view(read_buf); }
 
-    inline operator boost::asio::streambuf&() { return read_buf; }
+    inline operator boost::asio::streambuf &() { return read_buf; }
 
     inline void begin_read(const char* __file__, int __line__) {
+        _guard;
         if (read_buf_guard) {
             throw std::logic_error(
               "!! guard_read_buf failed! Cannot enter this function before _guard_read_buf_end  !! " +
               std::string(__file__) + ":" + std::to_string(__line__));
         }
         read_buf_guard = true;
+        _unguard;
     }
 
     inline void end_read() { read_buf_guard = false; }
@@ -336,14 +379,64 @@ class bytes_stat {
     }
 };
 
+class DomainMatcher {
+    class DomainLinkData {
+      public:
+        std::string suffix;
+        bool is_top{true};
+        std::vector<DomainLinkData> prefix;
+
+        DomainLinkData() = default;
+        DomainLinkData(std::string _suffix) : suffix(std::move(_suffix)) {
+            is_top = suffix == "com" || suffix == "org" || suffix == "net" || suffix == "int" || suffix == "edu" ||
+                     suffix == "gov" || suffix == "mil";
+        }
+
+        friend bool operator<(const DomainLinkData& a, const DomainLinkData& b) { return a.suffix < b.suffix; }
+    };
+
+    std::vector<DomainLinkData> domains;
+
+    void parse_line(const std::string& line);
+    static DomainLinkData* insert_domain_seg(std::vector<DomainLinkData>& list, const std::string& seg);
+    static const DomainLinkData* find_domain_seg(const std::vector<DomainLinkData>& list, const std::string& seg);
+
+  public:
+    bool load_from_stream(std::istream& is, size_t& loaded_count);
+    bool load_from_file(const std::string& filename, size_t& loaded_count);
+    [[nodiscard]] bool is_match(const std::string& domain) const;
+
+    static void test_cases();
+};
+
+class IPv4Matcher {
+    using IPList       = std::vector<uint32_t>;
+    using IPSubnetList = std::unordered_map<uint32_t, IPList>;
+
+    IPSubnetList subnet;
+    IPList ips;
+
+    static uint32_t get_ip_value(const std::string& ip_str);
+
+  public:
+    bool load_from_stream(std::istream& is, const std::string& filename, size_t& loaded_count);
+    bool load_from_file(const std::string& filename, size_t& loaded_count);
+
+    [[nodiscard]] bool is_match(uint32_t ip) const;
+
+    static void test_cases();
+};
+
 void android_protect_socket(int fd);
 
 template <typename ThisT, typename EndPoint>
 void connect_out_socket(ThisT this_ptr, std::string addr, std::string port, boost::asio::ip::tcp::resolver& resolver,
   boost::asio::ip::tcp::socket& out_socket, EndPoint in_endpoint, std::function<void()>&& connected_handler) {
+    _guard;
     resolver.async_resolve(addr, port,
       [=, &out_socket](
         const boost::system::error_code error, const boost::asio::ip::tcp::resolver::results_type& results) {
+          _guard;
           if (error || results.empty()) {
               _log_with_endpoint(in_endpoint,
                 "cannot resolve remote server hostname " + addr + ":" + port + " reason: " + error.message(),
@@ -392,6 +485,7 @@ void connect_out_socket(ThisT this_ptr, std::string addr, std::string port, boos
           }
 
           out_socket.async_connect(*iterator, [=](const boost::system::error_code error) {
+              _guard;
               if (timeout_timer) {
                   timeout_timer->cancel();
               }
@@ -405,18 +499,24 @@ void connect_out_socket(ThisT this_ptr, std::string addr, std::string port, boos
               }
 
               connected_handler();
+
+              _unguard;
           });
+
+          _unguard;
       });
+    _unguard;
 }
 
 template <typename ThisT, typename EndPoint>
 void connect_remote_server_ssl(ThisT this_ptr, std::string addr, std::string port,
-  boost::asio::ip::tcp::resolver& resolver, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& out_socket,
-  EndPoint in_endpoint, std::function<void()>&& connected_handler) {
-
+  boost::asio::ip::tcp::resolver& resolver, SSLSocket& out_socket, EndPoint in_endpoint,
+  std::function<void()>&& connected_handler) {
+    _guard;
     connect_out_socket(this_ptr, addr, port, resolver, out_socket.next_layer(), in_endpoint, [=, &out_socket]() {
         out_socket.async_handshake(
           boost::asio::ssl::stream_base::client, [=, &out_socket](const boost::system::error_code error) {
+              _guard;
               if (error) {
                   _log_with_endpoint(in_endpoint,
                     "SSL handshake failed with " + addr + ':' + port + " reason: " + error.message(), Log::ERROR);
@@ -433,17 +533,23 @@ void connect_remote_server_ssl(ThisT this_ptr, std::string addr, std::string por
                   }
               }
               connected_handler();
+
+              _unguard;
           });
     });
+
+    _unguard;
 }
 
-template <typename ThisPtr>
-void shutdown_ssl_socket(ThisPtr this_ptr, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& socket) {
+template <typename ThisPtr> void shutdown_ssl_socket(ThisPtr this_ptr, SSLSocket& socket) {
+    _guard;
+
     if (socket.next_layer().is_open()) {
         auto self = this_ptr->shared_from_this();
         auto ssl_shutdown_timer =
           std::make_shared<boost::asio::steady_timer>(this_ptr->get_service()->get_io_context());
         auto ssl_shutdown_cb = [self, ssl_shutdown_timer, &socket](const boost::system::error_code error) {
+            _guard;
             if (error == boost::asio::error::operation_aborted) {
                 return;
             }
@@ -452,6 +558,7 @@ void shutdown_ssl_socket(ThisPtr this_ptr, boost::asio::ssl::stream<boost::asio:
             socket.next_layer().cancel(ec);
             socket.next_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
             socket.next_layer().close(ec);
+            _unguard;
         };
         boost::system::error_code ec;
         socket.next_layer().cancel(ec);
@@ -460,9 +567,11 @@ void shutdown_ssl_socket(ThisPtr this_ptr, boost::asio::ssl::stream<boost::asio:
           std::chrono::seconds(this_ptr->get_config().get_ssl().ssl_shutdown_wait_time));
         ssl_shutdown_timer.get()->async_wait(ssl_shutdown_cb);
     }
+    _unguard;
 }
 
 template <class T> bool clear_weak_ptr_list(std::list<std::weak_ptr<T>>& l) {
+    _guard;
     bool changed = false;
     auto it      = l.begin();
     while (it != l.end()) {
@@ -475,15 +584,27 @@ template <class T> bool clear_weak_ptr_list(std::list<std::weak_ptr<T>>& l) {
     }
 
     return changed;
+    _unguard;
 }
 
-std::pair<std::string, uint16_t> recv_target_endpoint(int _native_fd);
+template <class T> bool safe_atov(const std::string& str, T& val) {
+    _guard;
+    if (str.empty()) {
+        return false;
+    }
+    std::stringstream ss(str);
+    return !((ss >> val).fail() || !(ss >> std::ws).eof());
+    _unguard;
+}
+
+std::pair<std::string, uint16_t> recv_target_endpoint(int _native_fd, bool use_tproxy);
 std::pair<std::string, uint16_t> recv_tproxy_udp_msg(
   int fd, boost::asio::ip::udp::endpoint& target_endpoint, char* buf, int& buf_len, int& ttl);
 bool set_udp_send_recv_buf(int fd, int buf_size);
 boost::asio::ip::udp::endpoint make_udp_endpoint_safe(
   const std::string& address, uint16_t port, boost::system::error_code& ec);
 
+bool prepare_transparent_socket(int fd, bool is_ipv4);
 bool prepare_nat_udp_bind(int fd, bool is_ipv4, bool recv_ttl);
 bool prepare_nat_udp_target_bind(
   int fd, bool is_ipv4, const boost::asio::ip::udp::endpoint& udp_target_endpoint, int buf_size);
@@ -499,15 +620,4 @@ using FILE_LOCK_HANDLE = HANDLE;
 FILE_LOCK_HANDLE get_file_lock(const char* filename);
 void close_file_lock(FILE_LOCK_HANDLE& file_fd);
 
-template <class T> bool safe_atov(const std::string& str, T& val) {
-    if (str.empty()) {
-        return false;
-    }
-    std::stringstream ss(str);
-    if ((ss >> val).fail() || !(ss >> std::ws).eof()) {
-        return false;
-    }
-
-    return true;
-}
 #endif //_TROJAN_UTILS_H_

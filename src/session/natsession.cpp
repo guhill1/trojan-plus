@@ -31,11 +31,12 @@ using namespace boost::asio::ssl;
 
 NATSession::NATSession(Service* _service, const Config& config, context& ssl_context)
     : ClientSession(_service, config, ssl_context) {
+    set_session_name("NATSession");
     set_status(CONNECT);
 }
 
 pair<string, uint16_t> NATSession::get_target_endpoint() {
-    return recv_target_endpoint((int)get_in_socket().native_handle());
+    return recv_target_endpoint((int)get_in_socket().native_handle(), get_config().get_tcp().use_tproxy);
 }
 
 void NATSession::start() {

@@ -24,6 +24,7 @@ cmake_minimum_required(VERSION 3.7.2)
 
 project(trojan CXX C)
 set(CMAKE_CXX_STANDARD 17)
+set(ANDROID FALSE)
 
 # c++17 standard support:
 # https://en.wikipedia.org/wiki/C%2B%2B17
@@ -42,41 +43,76 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL Release AND NOT MSVC AND NOT APPLE)
-    # reduce the sizeof binary, otherwise binary file will be very big
+if(CMAKE_BUILD_TYPE STREQUAL Release 
+    AND NOT MSVC 
+    AND NOT APPLE 
+    AND NOT ANDROID) # it will use POST_BUILD to strip
+
+    # reduce the size of binary, otherwise binary file will be very big unless strip it
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -s")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -s")
-
-    if(ANDROID)
-        # I don't know why andorid's clang++ compiler will report "clang++: warning: argument unused during compilation: '-s' [-Wunused-command-line-argument]"
-        # so I add this to surpass warning
-        set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -Qunused-arguments")
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Qunused-arguments")
-    endif()
 endif()
 
 if(MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_WIN32_WINNT=0x0601)
-
     if(CMAKE_BUILD_TYPE STREQUAL Release)
         set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MP")
     else()
         set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MP")
     endif()
-
 else()
     add_definitions(-Wall -Wextra)
 endif()
 
+if(ANDROID)
+    option(ENABLE_ANDROID_LOG "Build with LogCat output" ON)
+    if(ENABLE_ANDROID_LOG)
+        add_definitions(-DENABLE_ANDROID_LOG=1)
+        set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -llog")
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -llog")
+        set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -llog")
+        set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -llog")
+    endif()
+
+    # I don't know why andorid's clang++ compiler will report :
+    #   "clang++: warning: argument unused during compilation: '-llog' '-s' [-Wunused-command-line-argument]"
+    # so I add this to surpass warning
+    if(CMAKE_BUILD_TYPE STREQUAL Release)
+        set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -Qunused-arguments")
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Qunused-arguments")
+    else()
+        set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Qunused-arguments")
+        set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Qunused-arguments")
+    endif()    
+endif()
+
+option(USE_GUARD_BACKSTACK "Build with try catch all functions" OFF)
+if(USE_GUARD_BACKSTACK)
+    add_definitions(-DUSE_GUARD_BACKSTACK=1)
+endif()
+
 # force 1.73 boost compiling warning note
 add_definitions(-DBOOST_BIND_GLOBAL_PLACEHOLDERS=1)
+
+# badvpn definitions for tun2socks
+if(NOT MSVC)
+    if(APPLE)
+        add_definitions(-DBADVPN_FREEBSD=1)
+    else()
+        add_definitions(-DBADVPN_LINUX=1)
+    endif()
+endif()
+
+add_definitions(-DBADVPN_THREADWORK_USE_PTHREAD=1 -DBADVPN_BREACTOR_BADVPN=1)
+add_definitions(-D_GNU_SOURCE=1 -DBADVPN_USE_SIGNALFD=1 -DBADVPN_USE_EPOLL=1)
+add_definitions(-DBADVPN_LITTLE_ENDIAN=1 -DBADVPN_THREAD_SAFE=1)
 
 include_directories(
     src
 )
 
 set(TROJAN_SOURCE_FILES 
-    
+
     src/core/authenticator.cpp
     src/core/config.cpp
     src/core/log.cpp
@@ -90,7 +126,6 @@ set(TROJAN_SOURCE_FILES
     src/proto/trojanrequest.cpp
     src/proto/udppacket.cpp
     src/proto/pipelinerequest.cpp
-    src/proto/dns_header.cpp
     src/session/clientsession.cpp
     src/session/forwardsession.cpp
     src/session/natsession.cpp
@@ -105,8 +140,16 @@ set(TROJAN_SOURCE_FILES
 
 )
 
+if(ANDROID)
+    add_library(trojan SHARED ${TROJAN_SOURCE_FILES})
 
+    add_custom_command(TARGET trojan POST_BUILD
+        COMMAND "/bin/cp" -f libtrojan.so "${LIB_OUTPUT_DIR}/libtrojan.so"
+        COMMAND "${ANDROID_TOOLCHAIN_PREFIX}strip" -s "${LIB_OUTPUT_DIR}/libtrojan.so"
+        COMMENT "Strip debug symbols done on final binary.")
+else()
     add_executable(trojan ${TROJAN_SOURCE_FILES})
+endif()
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -135,11 +178,24 @@ else()
     set(GSL_FOUND TRUE)
   endif()
 endif()
- 
+
 # for cland-tidy compiling database by default the file is small, generation is cheap
 # as developer, I am always add this option...
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if (ANDROID)
+    set(ANDROID_MY_LIBS ${PROJECT_SOURCE_DIR}/trojan-plus-android-libs) 
+    set(ANDROID_MY_LIBS_LIBRARIES 
+        ${ANDROID_MY_LIBS}/lib/${ANDROID_ABI}/libssl.a 
+        ${ANDROID_MY_LIBS}/lib/${ANDROID_ABI}/libcrypto.a
+        ${ANDROID_MY_LIBS}/lib/${ANDROID_ABI}/libboost_system.a
+        ${ANDROID_MY_LIBS}/lib/${ANDROID_ABI}/libboost_program_options.a)
+
+    set(OPENSSL_VERSION 1.1.1)
+
+    include_directories(${ANDROID_MY_LIBS}/include)
+    target_link_libraries(trojan ${ANDROID_MY_LIBS_LIBRARIES})
+else()
     find_package(Boost 1.66.0 REQUIRED COMPONENTS system program_options)
     include_directories(${Boost_INCLUDE_DIR})
     target_link_libraries(trojan ${Boost_LIBRARIES})
@@ -150,6 +206,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
     find_package(OpenSSL 1.1.0 REQUIRED)
     include_directories(${OPENSSL_INCLUDE_DIR})
     target_link_libraries(trojan ${OPENSSL_LIBRARIES})
+endif()
 
 if(OPENSSL_VERSION VERSION_GREATER_EQUAL 1.1.1)
     option(ENABLE_SSL_KEYLOG "Build with SSL KeyLog support" ON)
@@ -168,7 +225,7 @@ if(FORCE_TCP_FASTOPEN)
     add_definitions(-DTCP_FASTOPEN=23 -DTCP_FASTOPEN_CONNECT=30)
 endif()
 
-if(NOT ANDROID)
+if(NOT ANDROID)    
     option(ENABLE_MYSQL "Build with MySQL support" ON)
     if(ENABLE_MYSQL)
         find_package(MySQL REQUIRED)
@@ -239,4 +296,5 @@ if(NOT ANDROID)
                 COMMAND bash ${CMAKE_SOURCE_DIR}/tests/LinuxSmokeTest/fake-client.sh ${CMAKE_BINARY_DIR}/trojan)
     endif()
 endif()
+
 
