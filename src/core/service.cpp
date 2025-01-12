@@ -547,7 +547,14 @@ void Service::udp_async_read() {
             int ttl         = -1;
 
             targetdst = recv_tproxy_udp_msg((int)udp_socket.native_handle(), udp_recv_endpoint,
-              boost::asio::buffer_cast<char*>(udp_read_buf.prepare(config.get_udp_recv_buf())), read_length, ttl);
+              // 假设 prepare 返回 mutable_buffer
+              boost::asio::mutable_buffer udp_buf = udp_read_buf.prepare(config.get_udp_recv_buf());
+
+              // 获取数据指针
+              char* data = boost::asio::buffer_cast<char*>(udp_buf);
+
+              // 获取缓冲区的大小（即 read_length）
+              std::size_t read_length = udp_read_buf.size();
 
             length = read_length < 0 ? 0 : read_length;
             udp_read_buf.commit(length);
