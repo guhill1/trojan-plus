@@ -71,7 +71,7 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
 
     udp_gc_timer.expires_after(chrono::seconds(timeout));
     auto self = shared_from_this();
-    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code& error) {
+    udp_gc_timer.async_wait([this, self, timeout](boost::system::error_code error) {
         _guard;
         if (!error) {
             auto curr = time(nullptr);
