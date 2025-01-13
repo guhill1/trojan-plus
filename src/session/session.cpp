@@ -42,7 +42,9 @@ Session::~Session() {
                             " called, current all sessions:  " + to_string(s_total_session_count));
 };
 
-int Session::get_udp_timer_timeout_val() const { return get_config().get_udp_timeout(); }
+int Session::get_udp_timer_timeout_val() const { 
+    return get_config().get_udp_timeout(); 
+}
 
 void Session::udp_timer_async_wait(int timeout /*=-1*/) {
     _guard;
@@ -57,33 +59,33 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
         timeout = get_udp_timer_timeout_val();
     }
 
-    if (udp_gc_timer_checker != 0 && check) {
-        auto curr = time(nullptr);
-        if (curr - udp_gc_timer_checker < timeout) {
+    if (udp_gc_timer_checker != std::chrono::system_clock::time_point() && check) {
+        auto curr = std::chrono::system_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(curr - udp_gc_timer_checker).count() < timeout) {
             udp_gc_timer_checker = curr;
             return;
         }
     } else {
-        udp_gc_timer_checker = time(nullptr);
+        udp_gc_timer_checker = std::chrono::system_clock::now();
     }
 
-    boost::system::error_code ec;
-    udp_gc_timer.cancel(ec);
+    boost::system::error_code ec{};
+    udp_gc_timer.cancel(ec, []{});
     if (ec) {
         output_debug_info_ec(ec);
         destroy();
         return;
     }
 
-    udp_gc_timer.expires_after(chrono::seconds(timeout));
+    udp_gc_timer.expires_after(std::chrono::seconds(timeout));
     auto self = shared_from_this();
-    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code error) {
+    udp_gc_timer.async_wait([this, self, timeout](boost::system::error_code error) {
         _guard;
         if (!error) {
-            auto curr = time(nullptr);
-            if (curr - udp_gc_timer_checker < timeout) {
-                auto diff            = int(timeout - (curr - udp_gc_timer_checker));
-                udp_gc_timer_checker = 0;
+            auto curr = std::chrono::system_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(curr - udp_gc_timer_checker).count() < timeout) {
+                auto diff = std::chrono::duration_cast<std::chrono::seconds>(timeout - (curr - udp_gc_timer_checker)).count();
+                udp_gc_timer_checker = std::chrono::system_clock::time_point();
                 udp_timer_async_wait(diff);
                 return;
             }
@@ -99,14 +101,17 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
 
 void Session::udp_timer_cancel() {
     _guard;
-    if (udp_gc_timer_checker == 0) {
+    if (udp_gc_timer_checker == std::chrono::system_clock::time_point()) {
         return;
     }
 
-    boost::system::error_code ec;
-    udp_gc_timer.cancel(ec);
+    boost::system::error_code ec{};
+    udp_gc_timer.cancel(ec, []{});
     if (ec) {
         output_debug_info_ec(ec);
     }
     _unguard;
 }
+
+// Update udp_gc_timer_checker declaration
+std::chrono::system_clock::time_point Session::udp_gc_timer_checker;
