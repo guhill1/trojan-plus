@@ -1,9 +1,9 @@
 /*
  * This file is part of the Trojan Plus project.
  * Trojan is an unidentifiable mechanism that helps you bypass GFW.
- * Trojan Plus is derived from the original Trojan project and written
+ * Trojan Plus is derived from original trojan project and writing
  * for more experimental features.
- * Copyright (C) 2017-2020 The Trojan Authors.
+ * Copyright (C) 2017-2020  The Trojan Authors.
  * Copyright (C) 2020 The Trojan Plus Group Authors.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -26,7 +26,6 @@
 using namespace std;
 
 size_t Session::s_total_session_count = 0;
-
 Session::Session(Service* _service, const Config& _config)
     : service(_service),
       udp_gc_timer(_service->get_io_context()),
@@ -39,30 +38,35 @@ Session::Session(Service* _service, const Config& _config)
 
 Session::~Session() {
     s_total_session_count--;
-    log_with_date_time((is_udp_forward_session() ? "[udp] ~" : "[tcp] ~") + session_name +
-                       " called, current all sessions: " + to_string(s_total_session_count));
-}
+    _log_with_date_time_ALL((is_udp_forward_session() ? "[udp] ~" : "[tcp] ~") + string(session_name) +
+                            " called, current all sessions:  " + to_string(s_total_session_count));
+};
 
-int Session::get_udp_timer_timeout_val() const {
-    return config.get_udp_timeout();
-}
+int Session::get_udp_timer_timeout_val() const { return get_config().get_udp_timeout(); }
 
-void Session::udp_timer_async_wait(int timeout) {
+void Session::udp_timer_async_wait(int timeout /*=-1*/) {
+    _guard;
+
     if (!is_udp_forward_session()) {
         return;
     }
+
+    bool check = timeout == -1;
 
     if (timeout == -1) {
         timeout = get_udp_timer_timeout_val();
     }
 
-    auto now = time(nullptr);
-    if (udp_gc_timer_checker != 0 && timeout == -1 && now - udp_gc_timer_checker < timeout) {
-        udp_gc_timer_checker = now;
-        return;
+    if (udp_gc_timer_checker != 0 && check) {
+        auto curr = time(nullptr);
+        if (curr - udp_gc_timer_checker < timeout) {
+            udp_gc_timer_checker = curr;
+            return;
+        }
+    } else {
+        udp_gc_timer_checker = time(nullptr);
     }
 
-    udp_gc_timer_checker = now;
     boost::system::error_code ec;
     udp_gc_timer.cancel(ec);
     if (ec) {
@@ -73,22 +77,28 @@ void Session::udp_timer_async_wait(int timeout) {
 
     udp_gc_timer.expires_after(chrono::seconds(timeout));
     auto self = shared_from_this();
-    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code& error) {
+    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code error) {
+        _guard;
         if (!error) {
-            auto now = time(nullptr);
-            if (now - udp_gc_timer_checker < timeout) {
+            auto curr = time(nullptr);
+            if (curr - udp_gc_timer_checker < timeout) {
+                auto diff            = int(timeout - (curr - udp_gc_timer_checker));
                 udp_gc_timer_checker = 0;
-                udp_timer_async_wait(timeout - (now - udp_gc_timer_checker));
+                udp_timer_async_wait(diff);
                 return;
             }
 
-            log_with_date_time("session_id: " + to_string(get_session_id()) + " UDP session timeout");
+            _log_with_date_time("session_id: " + to_string(get_session_id()) + " UDP session timeout");
             destroy();
         }
+        _unguard;
     });
+
+    _unguard;
 }
 
 void Session::udp_timer_cancel() {
+    _guard;
     if (udp_gc_timer_checker == 0) {
         return;
     }
@@ -98,4 +108,5 @@ void Session::udp_timer_cancel() {
     if (ec) {
         output_debug_info_ec(ec);
     }
+    _unguard;
 }
