@@ -67,19 +67,12 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
         udp_gc_timer_checker = time(nullptr);
     }
 
-    boost::system::error_code ec;
-    udp_gc_timer.cancel(ec);
-    if (ec) {
-        output_debug_info_ec(ec);
-        destroy();
-        return;
-    }
-
+    udp_gc_timer.cancel();
     udp_gc_timer.expires_after(chrono::seconds(timeout));
     auto self = shared_from_this();
-    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code error) {
+    udp_gc_timer.async_wait(boost::asio::bind_executor(udp_gc_timer.get_executor(), [this, self, timeout](boost::system::error_code ec) {
         _guard;
-        if (!error) {
+        if (!ec) {
             auto curr = time(nullptr);
             if (curr - udp_gc_timer_checker < timeout) {
                 auto diff            = int(timeout - (curr - udp_gc_timer_checker));
@@ -92,7 +85,7 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
             destroy();
         }
         _unguard;
-    });
+    }));
 
     _unguard;
 }
@@ -103,10 +96,7 @@ void Session::udp_timer_cancel() {
         return;
     }
 
-    boost::system::error_code ec;
-    udp_gc_timer.cancel(ec);
-    if (ec) {
-        output_debug_info_ec(ec);
-    }
+    udp_gc_timer.cancel();
     _unguard;
 }
+
