@@ -26,6 +26,7 @@
 using namespace std;
 
 size_t Session::s_total_session_count = 0;
+
 Session::Session(Service* _service, const Config& _config)
     : service(_service),
       udp_gc_timer(_service->get_io_context()),
@@ -39,10 +40,12 @@ Session::Session(Service* _service, const Config& _config)
 Session::~Session() {
     s_total_session_count--;
     _log_with_date_time_ALL((is_udp_forward_session() ? "[udp] ~" : "[tcp] ~") + string(session_name) +
-                            " called, current all sessions:  " + to_string(s_total_session_count));
-};
+                            " called, current all sessions: " + to_string(s_total_session_count));
+}
 
-int Session::get_udp_timer_timeout_val() const { return get_config().get_udp_timeout(); }
+int Session::get_udp_timer_timeout_val() const {
+    return get_config().get_udp_timeout();
+}
 
 void Session::udp_timer_async_wait(int timeout /*=-1*/) {
     _guard;
@@ -51,22 +54,19 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
         return;
     }
 
-    bool check = timeout == -1;
-
     if (timeout == -1) {
         timeout = get_udp_timer_timeout_val();
     }
 
-    if (udp_gc_timer_checker != 0 && check) {
-        auto curr = time(nullptr);
-        if (curr - udp_gc_timer_checker < timeout) {
-            udp_gc_timer_checker = curr;
-            return;
-        }
-    } else {
+    // Check if the UDP timer should be checked for timeout
+    if (udp_gc_timer_checker != 0 && (timeout == -1 || time(nullptr) - udp_gc_timer_checker < timeout)) {
         udp_gc_timer_checker = time(nullptr);
+        return;
     }
 
+    udp_gc_timer_checker = time(nullptr);
+
+    // Cancel any existing timer to set the new one
     boost::system::error_code ec;
     udp_gc_timer.cancel(ec);
     if (ec) {
@@ -77,14 +77,14 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
 
     udp_gc_timer.expires_after(chrono::seconds(timeout));
     auto self = shared_from_this();
-    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code error) {
+    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code& error) {
         _guard;
         if (!error) {
             auto curr = time(nullptr);
             if (curr - udp_gc_timer_checker < timeout) {
-                auto diff            = int(timeout - (curr - udp_gc_timer_checker));
+                int diff = int(timeout - (curr - udp_gc_timer_checker));
                 udp_gc_timer_checker = 0;
-                udp_timer_async_wait(diff);
+                udp_timer_async_wait(diff);  // Wait again with the new remaining time
                 return;
             }
 
