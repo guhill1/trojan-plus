@@ -26,15 +26,13 @@
 using namespace std;
 
 size_t Session::s_total_session_count = 0;
-
 Session::Session(Service* _service, const Config& _config)
     : service(_service),
-      udp_gc_timer(_service->get_io_context()), // 仍然使用 boost::asio::deadline_timer
+      udp_gc_timer(_service->get_io_context()),
       pipeline_com(_config),
       is_udp_forward(false),
       config(_config),
-      session_name("Session"),
-      udp_gc_timer_checker(0) { // 初始化计时器检查器
+      session_name("Session") {
     s_total_session_count++;
 }
 
@@ -42,7 +40,7 @@ Session::~Session() {
     s_total_session_count--;
     _log_with_date_time_ALL((is_udp_forward_session() ? "[udp] ~" : "[tcp] ~") + string(session_name) +
                             " called, current all sessions:  " + to_string(s_total_session_count));
-}
+};
 
 int Session::get_udp_timer_timeout_val() const { return get_config().get_udp_timeout(); }
 
@@ -62,38 +60,36 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
     if (udp_gc_timer_checker != 0 && check) {
         auto curr = time(nullptr);
         if (curr - udp_gc_timer_checker < timeout) {
-            udp_gc_timer_checker = curr; // 更新计时器检查器
+            udp_gc_timer_checker = curr;
             return;
         }
     } else {
-        udp_gc_timer_checker = time(nullptr); // 初始化计时器检查器
+        udp_gc_timer_checker = time(nullptr);
     }
 
     boost::system::error_code ec;
-    udp_gc_timer.cancel(ec); // 取消当前计时器
+    udp_gc_timer.cancel(ec);
     if (ec) {
-        output_debug_info_ec(ec); // 输出错误信息
+        output_debug_info_ec(ec);
         destroy();
         return;
     }
 
-    udp_gc_timer.expires_from_now(boost::posix_time::seconds(timeout)); // 设置超时时间
+    udp_gc_timer.expires_after(chrono::seconds(timeout));
     auto self = shared_from_this();
-    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code& error) {
+    udp_gc_timer.async_wait([this, self, timeout](const boost::system::error_code error) {
         _guard;
         if (!error) {
             auto curr = time(nullptr);
             if (curr - udp_gc_timer_checker < timeout) {
-                auto diff = timeout - (curr - udp_gc_timer_checker);
-                udp_gc_timer_checker = 0; // 重置计时器检查器
-                udp_timer_async_wait(diff); // 重新等待剩余时间
+                auto diff            = int(timeout - (curr - udp_gc_timer_checker));
+                udp_gc_timer_checker = 0;
+                udp_timer_async_wait(diff);
                 return;
             }
 
             _log_with_date_time("session_id: " + to_string(get_session_id()) + " UDP session timeout");
             destroy();
-        } else if (error != boost::asio::error::operation_aborted) {
-            output_debug_info_ec(error);
         }
         _unguard;
     });
@@ -103,17 +99,14 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
 
 void Session::udp_timer_cancel() {
     _guard;
-
     if (udp_gc_timer_checker == 0) {
         return;
     }
 
     boost::system::error_code ec;
-    udp_gc_timer.cancel(ec); // 取消计时器
+    udp_gc_timer.cancel(ec);
     if (ec) {
         output_debug_info_ec(ec);
     }
-
-    udp_gc_timer_checker = 0; // 重置计时器检查器
     _unguard;
 }
