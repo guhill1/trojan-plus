@@ -29,12 +29,12 @@ size_t Session::s_total_session_count = 0;
 
 Session::Session(Service* _service, const Config& _config)
     : service(_service),
-      udp_gc_timer(_service->get_io_context()),
-      udp_gc_timer_checker(0),
+      udp_gc_timer(_service->get_io_context()), 
+      udp_gc_timer_checker(0), 
       pipeline_com(_config),
       is_udp_forward(false),
       config(_config),
-      session_name("Session") {
+      session_name("Session") { 
     s_total_session_count++;
 }
 
@@ -62,14 +62,14 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
     if (udp_gc_timer_checker != 0 && check) {
         auto curr = time(nullptr);
         if (curr - udp_gc_timer_checker < timeout) {
-            udp_gc_timer_checker = curr;
+            udp_gc_timer_checker = curr; 
             return;
         }
     } else {
-        udp_gc_timer_checker = time(nullptr);
+        udp_gc_timer_checker = time(nullptr); 
     }
 
-    udp_gc_timer.cancel();
+    udp_gc_timer.cancel(); 
 
     udp_gc_timer.expires_after(chrono::seconds(timeout));
     auto self = shared_from_this();
@@ -79,8 +79,8 @@ void Session::udp_timer_async_wait(int timeout /*=-1*/) {
             auto curr = time(nullptr);
             if (curr - udp_gc_timer_checker < timeout) {
                 auto diff = timeout - (curr - udp_gc_timer_checker);
-                udp_gc_timer_checker = 0;
-                udp_timer_async_wait(diff);
+                udp_gc_timer_checker = 0; 
+                udp_timer_async_wait(diff); 
                 return;
             }
 
@@ -102,8 +102,8 @@ void Session::udp_timer_cancel() {
         return;
     }
 
-    udp_gc_timer.cancel();
+    udp_gc_timer.cancel(); 
 
-    udp_gc_timer_checker = 0;
+    udp_gc_timer_checker = 0; 
     _unguard;
 }
